@@ -1,0 +1,258 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+
+strategy("whalebot", overlay=true, pyramiding=1, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_order_fills=false, slippage=0, commission_type=strategy.commission.percent, commission_value=0.04)
+
+//SOURCE CODE
+
+src = input.source(close, "Source")
+
+// INPUTS
+
+//ADX
+
+Act_ADX = input.bool(true, title = "AVERAGE DIRECTIONAL INDEX")
+ADX_len = input.int(14, title = "ADX LENGTH", minval = 1)
+th = input.float(20, title = "ADX THRESHOLD", minval = 0, step = 0.5)
+
+//Range Filter
+
+length0 = input.int(6, title="Range Filter lenght")
+mult = input.int(4, title="Range Filter mult")
+
+//SAR
+
+start = input.float(title="SAR Start", step=0.001, defval=0.046)
+increment = input.float(title="SAR Increment", step=0.001, defval=0.02)
+maximum = input.float(title="SAR Maximum", step=0.01, defval=0.11)
+width = input.int(title="SAR Point Width", minval=1, defval=1)
+
+//RSI
+
+len_3 = input.int(131, minval=1, title="RSI lenght")
+src_3 = input.source(hl2, "RSI Source")
+
+//TWAP Trend
+
+smoothing = input.int(title="TWAP Smoothing", defval= 11)
+resolution = input.string("0", "TWAP Timeframe")
+
+//JMA
+
+inp = input.source(title="JMA Source", defval=hlc3)
+reso = input.timeframe(title="JMA Resolution", defval="")
+rep = input.bool(title="JMA Allow Repainting?", defval=false)
+src0 = request.security(syminfo.tickerid, reso, inp[rep ? 0 : barstate.isrealtime ? 1 : 0])[rep ? 0 : barstate.isrealtime ? 0 : 1]
+lengths = input.int(title="JMA Length", defval=8, minval=1)
+
+//MACD
+
+fast_length = input.int(title="MACD Fast Length", defval=5)
+slow_length = input.int(title="MACD Slow Length", defval=21)
+signal_length = input.int(title="MACD Signal Smoothing", minval = 1, maxval = 50, defval = 31)
+
+//Volume Delta
+
+periodMa = input.int(title="Delta Length", minval=1, defval=16)
+
+//Volume weight
+
+maLength = input.int(title="Volume Weight Length", defval=59, minval=1)
+maType = input.string(title="Volume Weight Type", defval="EMA", options=["EMA", "SMA", "HMA", "WMA", "DEMA"])
+rvolTrigger = input.float(title="Volume To Trigger Signal", defval=0.1, step=0.1 , minval=0.1)
+
+//MA
+
+length = input.int(50, minval=1, title="MA Length")
+matype = input.int(5, minval=1, maxval=5, title="AvgType")
+
+//INDICATORS
+
+//ADX
+
+calcADX(_len) =>
+    up              = ta.change(high)
+    down            = -ta.change(low)
+    plusDM          = na(up)   ? na : (up > down and up > 0   ? up   : 0)
+    minusDM         = na(down) ? na : (down > up and down > 0 ? down : 0)
+    truerange       = ta.rma(ta.tr, _len)
+    _plus           = fixnan(100 * ta.rma(plusDM, _len)  / truerange)
+    _minus          = fixnan(100 * ta.rma(minusDM, _len) / truerange)
+    sum             = _plus + _minus
+    _adx            = 100 * ta.rma(math.abs(_plus - _minus) / (sum == 0 ? 1 : sum), _len)
+    [_plus,_minus,_adx]
+
+[DIPlus,DIMinus,ADX] = calcADX(ADX_len)
+
+ADX_color = DIPlus > DIMinus and ADX > th ? color.green : DIPlus < DIMinus and ADX > th ? color.red : color.orange
+barcolor(color = Act_ADX ? ADX_color : na, title = "ADX")
+
+//Range Filter
+
+var cma = 0.0
+var cts = 0.0
+Var = ta.variance(src,length0)*mult
+sma = ta.sma(src,length0)
+
+secma = math.pow(nz(sma - cma[1]),2)
+sects = math.pow(nz(src - cts[1]),2)
+ka = Var < secma ? 1 - Var/secma : 0
+kb = Var < sects ? 1 - Var/sects : 0
+
+cma := ka*sma+(1-ka)*nz(cma[1],src)
+cts := kb*src+(1-kb)*nz(cts[1],src)
+
+css = cts > cma ? color.green : color.red
+a = plot(src,"Price Trend",css,2,style=plot.style_stepline)
+
+rangegood = cts > cma
+rangebad  = cts < cma
+
+//SAR
+
+psar = ta.sar(start, increment, maximum)
+dir = psar < close ? 1 : -1
+
+psarColor = dir == 1 ? color.green : color.red
+psarPlot = plot(psar, title="PSAR", style=plot.style_circles, linewidth=width, color=psarColor)
+
+var color longColor = color.green
+var color shortColor = color.red
+
+sargood = dir ==1
+sarbad  = dir ==-1
+
+//RSI
+
+up_3 = ta.rma(math.max(ta.change(src_3), 0), len_3)
+down_3 = ta.rma(-math.min(ta.change(src_3), 0), len_3)
+rsi_3 = down_3 == 0 ? 100 : up_3 == 0 ? 0 : 100 - (100 / (1 + up_3 / down_3))
+
+rsiob = (rsi_3 < 70)
+rsios  = (rsi_3 > 30)
+
+//TWAP Trend
+
+res = resolution != "0" ? resolution : timeframe.period
+weight = ta.barssince(ta.change(request.security(syminfo.tickerid, res, time, lookahead=barmerge.lookahead_on)) != 0)
+var price = 0.0
+price:= weight == 0 ? src : src + nz(price[1])
+twap = price / (weight + 1)
+ma_ = smoothing < 2 ? twap : ta.sma(twap, smoothing)
+bullish = smoothing < 2 ? src >= ma_ : src > ma_
+disposition = bullish ? color.lime : color.red
+basis = plot(src, "OHLC4", color.new(disposition,100), linewidth=1)
+work = plot(ma_, "TWAP", color.new(disposition,20), linewidth=2)
+fill(basis, work, color=color.new(disposition,65))
+
+//JMA
+
+jsa = (src0 + src0[lengths]) / 2
+sig = src0 > jsa ? 1 : src0 < jsa ? -1 : 0
+
+jsaColor = sig > 0 ? color.green : sig < 0 ? color.red : color.orange
+plot(jsa, color=jsaColor, linewidth=2)
+
+jmagood = sig > 0
+jmabad  = sig < 0
+
+//MACD
+
+fast_ma = ta.ema(src, fast_length)
+slow_ma = ta.ema(src, slow_length)
+macd = fast_ma - slow_ma
+signal = ta.sma(macd, signal_length)
+
+macdgood = macd > signal
+macdbad  = macd < signal
+
+//Volume Delta
+
+bullPower = close < open ? (close[1] < open ? math.max(high - close[1], close - low) : math.max(high - open, close - low)) : close > open ? (close[1] > open ? high - low : math.max(open - close[1], high - low)) : high - close > close - low ? (close[1] < open ? math.max(high - close[1], close - low) : high - open) : high - close < close - low ? (close[1] > open ? high - low : math.max(open - close[1], high - low)) : close[1] > open ? math.max(high - open, close - low) : close[1] < open ? math.max(open - close[1], high - low) : high - low
+
+bearPower = close < open ? (close[1] > open ? math.max(close[1] - open, high - low) : high - low) : close > open ? (close[1] > open ? math.max(close[1] - low, high - close) : math.max(open - low, high - close)) : high - close > close - low ? (close[1] > open ? math.max(close[1] - open, high - low) : high - low) : high - close < close - low ? (close[1] > open ? math.max(close[1] - low, high - close) : open - low) : close[1] > open ? math.max(close[1] - open, high - low) : close[1] < open ? math.max(open - low, high - close) : high - low
+
+bullVolume = (bullPower / (bullPower + bearPower)) * volume
+bearVolume = (bearPower / (bullPower + bearPower)) * volume
+
+delta = bullVolume - bearVolume
+cvd = ta.cum(delta)
+cvdMa = ta.sma(cvd, periodMa)
+
+deltagood = cvd > cvdMa
+deltabad  = cvd < cvdMa
+
+//Volume weight
+
+getMA0(volLength) =>
+    maPrice = ta.ema(volume, volLength)
+    if maType == "SMA"
+        maPrice := ta.sma(volume, volLength)
+    if maType == "HMA"
+        maPrice := ta.hma(volume, volLength)
+    if maType == "WMA"
+        maPrice := ta.wma(volume, volLength)
+    if maType == "DEMA"
+        e1 = ta.ema(volume, volLength)
+        e2 = ta.ema(e1, volLength)
+        maPrice := 2 * e1 - e2
+    maPrice
+
+ma = getMA0(maLength)
+rvol = volume / ma
+
+volumegood = volume > rvolTrigger * ma
+
+//MA
+
+ma5 = ta.sma(close, 5)
+ma10 = ta.sma(close, 10)
+ma30 = ta.sma(close, 30)
+
+magood = ma5 > ma30
+mabad  = ma5 < ma30
+
+simplema = ta.sma(src,length)
+exponentialma = ta.ema(src,length)
+hullma = ta.wma(2*ta.wma(src, length/2)-ta.wma(src, length), math.round(math.sqrt(length)))
+weightedma = ta.wma(src, length)
+volweightedma = ta.vwma(src, length)
+avgval = matype==1 ? simplema : matype==2 ? exponentialma : matype==3 ? hullma : matype==4 ? weightedma : matype==5 ? volweightedma : na
+MA_speed = (avgval / avgval[1] -1 ) *100
+
+masgood = MA_speed > 0
+masbad  = MA_speed < 0
+
+//STRATEGY
+
+minSignals = input.int(8, title="Min Confluence Signals (out of 9)", minval=1, maxval=9)
+
+longSignals  = (volumegood ? 1 : 0) + (sargood ? 1 : 0) + (rsiob ? 1 : 0) + (macdgood ? 1 : 0) + (deltagood ? 1 : 0) + (magood ? 1 : 0) + (masgood ? 1 : 0) + (jmagood ? 1 : 0) + (rangegood ? 1 : 0)
+shortSignals = (volumegood ? 1 : 0) + (sarbad  ? 1 : 0) + (rsios ? 1 : 0)  + (macdbad  ? 1 : 0) + (deltabad  ? 1 : 0) + (mabad  ? 1 : 0) + (masbad  ? 1 : 0) + (jmabad  ? 1 : 0) + (rangebad  ? 1 : 0)
+
+Long = (DIPlus > DIMinus and ADX > th) and bullish and longSignals >= minSignals
+Short = (DIPlus < DIMinus and ADX > th) and not bullish and shortSignals >= minSignals
+
+//SIGNALS
+
+if Long
+    strategy.entry("LONG", strategy.long)
+
+if Short
+    strategy.entry("SHORT", strategy.short)
+
+per(pcnt) =>
+    strategy.position_size != 0 ? math.round(pcnt / 100 * strategy.position_avg_price / syminfo.mintick) : float(na)
+stoploss=input.float(title=" stop loss", defval=1, minval=0.01)
+los = per(stoploss)
+q=input.int(title=" qty percent", defval=100, minval=1)
+
+tp=input.float(title=" Take profit", defval=0.8, minval=0.01)
+
+useTrail = input.bool(true, title="Use Trailing Stop")
+trailTrigger = input.float(0.5, title="Trail Trigger %", minval=0.01)
+trailOffset = input.float(0.25, title="Trail Offset %", minval=0.01)
+trailPts = useTrail ? per(trailTrigger) : na
+trailOffs = useTrail ? per(trailOffset) : na
+
+strategy.exit("Take profit", qty_percent = q, profit = per(tp), loss = los, trail_points = trailPts, trail_offset = trailOffs)
